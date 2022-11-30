@@ -13,7 +13,7 @@ load_dotenv()
 
 VALIDATORS_APP_API_KEY = os.getenv("VALIDATORS_APP_API_KEY")
 PRC_URL = os.getenv("RPC_URL") or "https://api.mainnet-beta.solana.com/"
-COMMISSION_CHANGES_DATE_FROM = "2022-11-01T01:02:12"
+COMMISSION_CHANGES_DATE_FROM = "2022-01-01T00:00:12"
 
 
 def get_sfdp_approved_participants():
@@ -46,6 +46,11 @@ def get_sfdp_approved_participants():
     return approved_participants
 
 
+def get_current_epoch():
+    solana_client = Client(PRC_URL, Confirmed)
+    return solana_client.get_epoch_info().value.epoch
+
+
 def get_validators_app_data(network="mainnet"):
     url = f"https://www.validators.app/api/v1/validators/{network}.json?order=stake"
     r = requests.get(url, headers={"Token": VALIDATORS_APP_API_KEY})
@@ -53,9 +58,28 @@ def get_validators_app_data(network="mainnet"):
 
 
 def get_commission_changes(network="mainnet"):
-    url = f"https://www.validators.app/api/v1/commission-changes/{network}.json?date_from={COMMISSION_CHANGES_DATE_FROM}&per=2000"
-    r = requests.get(url, headers={"Token": VALIDATORS_APP_API_KEY})
-    return r.json()
+    page = 1
+    PER_PAGE = 1000
+    commission_changes_list = []
+    COMMISSION_KEY = "commission_histories"
+    while True:
+        url = f"https://www.validators.app/api/v1/commission-changes/{network}.json?date_from={COMMISSION_CHANGES_DATE_FROM}&per={PER_PAGE}&page={page}"
+        r = requests.get(url, headers={"Token": VALIDATORS_APP_API_KEY})
+
+        if r.status_code != 200:
+            break
+
+        result = r.json()
+
+        comm_changes = result[COMMISSION_KEY]
+
+        commission_changes_list = [*commission_changes_list, *comm_changes]
+
+        if len(comm_changes) < PER_PAGE:
+            break
+
+        page += 1
+    return commission_changes_list
 
 
 def get_sfdp_set():
@@ -106,7 +130,8 @@ def squash_all_transactions_in_same_epoch(all_transactions):
 
     return account_to_epoch_map
 
-
+# TODO: Fix this filter function
+#
 # def filter_out_valid_commission_changers_within_epoch(squashed_transactions):
 #     accounts_to_remove = []
 #     for account in squashed_transactions:
@@ -125,26 +150,29 @@ def squash_all_transactions_in_same_epoch(all_transactions):
 #     return squashed_transactions
 
 
-def print_cheaters_as_csv(squashed_transactions, id_to_vote_key_map):
+def print_cheaters_as_csv(squashed_transactions, id_to_vote_key_map, current_epoch):
     for account in squashed_transactions:
         for epoch in squashed_transactions[account]:
             last_tx = squashed_transactions[account][epoch][-1]
-            if int(last_tx['commission_after']) > 10 and int(last_tx['epoch']) < 379:
+            if int(last_tx['commission_after']) > 10 and int(last_tx['epoch']) < current_epoch:
                 print(
                     f"{last_tx['account']},{id_to_vote_key_map[last_tx['account']]},{last_tx['created_at']},{last_tx['commission_before']},{last_tx['commission_after']},{last_tx['epoch']},{last_tx['epoch_completion']}")
 
 
+commission_changes = get_commission_changes()
 all_validators = get_validators_app_data()
 
 id_to_vote_key_map = create_all_identity_to_vote_key_map(all_validators)
 res = get_commission_changes()
 sfdp = get_sfdp_set()
-cheaters = filter_for_cheaters(sfdp, res['commission_histories'])
+
+cheaters = filter_for_cheaters(sfdp, commission_changes)
 all_transactions = get_all_transactions_related_to_cheaters(
-    cheaters, res['commission_histories'])
+    cheaters, commission_changes)
 squashed_transactions = squash_all_transactions_in_same_epoch(all_transactions)
 # filtered_and_squashed_transactions = filter_out_valid_commission_changers_within_epoch(
 #     squashed_transactions)
 
 
-print_cheaters_as_csv(squashed_transactions, id_to_vote_key_map)
+current_epoch = get_current_epoch()
+print_cheaters_as_csv(squashed_transactions, id_to_vote_key_map, current_epoch)
